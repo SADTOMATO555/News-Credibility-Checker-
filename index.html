@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>News Source Checker</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Inter Font -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom scrollbar for dark theme */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #334155; }
+    </style>
+</head>
+<body class="bg-slate-950 antialiased min-h-screen p-4 flex justify-center items-start">
+
+    <div id="app-root" class="w-full max-w-4xl py-12">
+        <!-- App content will be rendered here -->
+    </div>
+
+    <!-- 
+        --- FIREBASE GLOBAL SCRIPTS (Kept for local run compatibility) ---
+        The app runs in Mock/Offline mode when opened locally.
+    -->
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-auth.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-firestore.js"></script>
+    
+    <script>
+        // --- Self-Contained Defaults for Standalone Execution ---
+        const appId = 'standalone-local-app';
+        const firebaseConfig = {}; 
+        const initialAuthToken = undefined;
+
+        let db, auth;
+        let userId = 'anonymous-local';
+        let authStatus = 'Offline'; 
+        let cacheStatus = 'Offline';
+        
+        // Mock DB implementation to prevent errors and allow local execution
+        const FAKE_FIREBASE_MOCK = {
+            doc: (db, path, domain) => ({ __ref: path + '/' + domain }),
+            getDoc: async (docRef) => { 
+                return { exists: () => false }; 
+            },
+            setDoc: async (docRef, data) => { 
+                console.log('Caching data (MOCK):', data.domain, '-> Write attempted but ignored in offline mode.');
+            },
+        };
+
+        const initFirebase = async () => {
+            // Enforce Mock/Offline mode for local file execution robustness
+            authStatus = 'Offline';
+            cacheStatus = 'Offline';
+            db = FAKE_FIREBASE_MOCK;
+            
+            if (typeof firebase !== 'undefined' && firebaseConfig.projectId) {
+                try {
+                    const app = firebase.initializeApp(firebaseConfig);
+                    auth = firebase.auth(app);
+                    db = firebase.firestore(app);
+                    authStatus = 'Connecting';
+                    if (initialAuthToken) {
+                        await auth.signInWithCustomToken(initialAuthToken);
+                    } else {
+                        await auth.signInAnonymously();
+                    }
+                    userId = auth.currentUser?.uid || 'anonymous';
+                    authStatus = 'Online';
+                    cacheStatus = 'Online';
+                } catch (e) {
+                    console.error("Firebase initialization failed, falling back to Mock DB:", e);
+                }
+            }
+        };
+
+        // --- DATA SOURCES AND UTILITY FUNCTIONS ---
+        // CLASSIFICATION MATRIX: EXPANDED WITH OVER 100 NEW DOMAINS
+        const DATA_SOURCES = {
+            // Tier 1: Public Service, Academic, Non-Profit Investigative, Top Global Standards
+            HIGH_TRUST: [
+                "bbc.com", "reuters.com", "apnews.com", "factcheck.org", "poynter.org", "nature.com", "sciencemag.org", 
+                "nih.gov", "cdc.gov", "stanford.edu", "propublica.org", "snopes.com", "politifact.com", "bellingcat.com", 
+                "cbc.ca", "theglobeandmail.com", "dw.com", "lemonde.fr", "zeit.de", "elpais.com", "smh.com.au", 
+                "theage.com.au", "spiegel.de", "asahi.com", "yomiuri.co.jp", "nhk.or.jp", "koreatimes.co.kr", 
+                "indiatoday.in", "hindustantimes.com", "thehindu.com", "csmonitor.com", "pbs.org", "brookings.edu", 
+                "cfr.org", "nber.org", "lancet.com", "nejm.org", "who.int", "fda.gov", "epa.gov", "nasa.gov", 
+                "esa.int", "usatoday.com", "newsweek.com", "nbcnews.com", "cbsnews.com", "abcnews.go.com", 
+                "latimes.com", "chicagotribune.com", "ft.com", "theguardian.com", "aljazeera.net", "theintercept.com",
+                "vox.com", "sueddeutsche.de", "faz.net", "thetimes.co.uk", "jpost.com", "haaretz.com", "thestar.com",
+                "dn.no", "aftenposten.no", "jornaldenegocios.pt", "clarin.com", "lanacion.com.ar", "eluniversal.com.mx", 
+                "rtv.es", "rainews.it", "rtbf.be", "swissinfo.ch", "rte.ie", "yp.scmp.com"
+            ],
+            // Major Commercial Outlets: High Editorial Standards, Broader Coverage, Moderate Bias Risk
+            MODERATE_TRUST: [
+                "nytimes.com", "washingtonpost.com", "wsj.com", "npr.org", "economist.com", "cnn.com", 
+                "usnews.com", "forbes.com", "businessinsider.com", "cnbc.com", "marketwatch.com", 
+                "zdnet.com", "techcrunch.com", "mashable.com", "inquirer.net", "scmp.com", "japantimes.co.jp", 
+                "cnet.com", "engadget.com", "wired.com", "buzzfeednews.com", "vice.com", "bloomberg.com", 
+                "ap.org", "dpa.com", "ansa.it", "upi.com", "kyodonews.net", "france24.com", "eunews.it", 
+                "euronews.com", "thehill.com", "arstechnica.com", "motherjones.com"
+            ],
+            // Partisan/Ideological Outlets: Defined Political/Commercial Agendas, Moderate Trust Risk
+            HIGH_BIAS: [
+                "foxnews.com", "msnbc.com", "dailywire.com", "dailykos.com", "huffpost.com", "nationalreview.com", 
+                "thefederalist.com", "cato.org", "aclu.org", "dailymail.co.uk", "theblaze.com", "jacobinmag.com", 
+                "dailyexpress.co.uk", "nypost.com", "pjmedia.com", "dailycaller.com", "redstate.com", 
+                "washingtontimes.com", "theatlantic.com", "spectator.co.uk", "reason.com", "salon.com", 
+                "rawstory.com", "truthout.org", "infowars.com", "breitbart.com", "oann.com", "wnd.com",
+                "conservativebrief.com", "occupydemocrats.com", "drudgereport.com", "dailysignal.com"
+            ],
+            // Flagged for Systematic Misinformation, Extreme Political Agendas, or Known Propaganda
+            EXTREME_RISK: [
+                "naturalnews.com", "theepochtimes.com", "zerohedge.com", "dailyexpose.uk", 
+                "projectveritas.com", "rt.com", "sputniknews.com", "globalresearch.ca", "babylonbee.com",
+                "beforeitsnews.com", "activistpost.com", "freedomoutpost.com", "mises.org", "aim.org", "dailywire.com"
+            ],
+            // Platforms where content quality is entirely user-dependent
+            UGC_RISK: [
+                "tiktok.com", "twitter.com", "x.com", "facebook.com", "youtube.com", "reddit.com", 
+                "medium.com", "substack.com", "gab.com", "rumble.com", "telegram.org", "pinterest.com"
+            ]
+        };
+        
+        const SOURCE_TYPES = {
+            "nature.com": "Academic/Science Journal (Peer-Reviewed)",
+            "propublica.org": "Non-Profit Investigative Journalism",
+            "bloomberg.com": "Global Business/Financial News",
+            "cdc.gov": "Government/Public Health Authority",
+            "bbc.com": "International Public Broadcaster (Chartered)",
+            "dw.com": "International Public Broadcaster (German)",
+            "leMonde.fr": "Major French Daily (High Standards)",
+            "usatoday.com": "Major National Daily Newspaper (US)",
+        };
+
+        const getDomain = (url) => {
+            try {
+                const protocolledUrl = url.startsWith('http') ? url : `https://${url}`;
+                const parsedUrl = new URL(protocolledUrl);
+                return parsedUrl.hostname.toLowerCase().replace(/^www\./, '');
+            } catch (e) {
+                return '';
+            }
+        };
+
+        const isInSourceList = (domain, list) => {
+            return list.some(source => domain === source || domain.endsWith('.' + source));
+        };
+
+        const calculateCredibility = (url) => {
+            const domain = getDomain(url);
+            let result = {
+                trustScore: 50, biasScore: 50, overallScore: 50,
+                verdict: "Unclassified Source",
+                explanation: ["Domain is not classified in the intelligence matrix. Default scores assigned. **Manual verification recommended.**"],
+                domain: domain, typeLabel: "General Web Entity", color: "yellow",
+            };
+
+            if (!domain) {
+                return { ...result, verdict: "Input Error", overallScore: 0, explanation: ["Please enter a valid URL (e.g., https://example.com)."], color: "red", domain: "N/A" };
+            }
+
+            // Flagged checks run first
+            if (isInSourceList(domain, DATA_SOURCES.EXTREME_RISK)) {
+                result.trustScore = 15; result.biasScore = 10; result.verdict = "Extreme Risk / Propaganda";
+                result.explanation = ["This source is flagged for systematic dissemination of misinformation or extremist content. **Trust is near zero.**"];
+                result.color = "red"; result.typeLabel = "Flagged Misinformation Network";
+            } else if (isInSourceList(domain, DATA_SOURCES.UGC_RISK)) {
+                result.trustScore = 30; result.biasScore = 60; result.verdict = "User-Generated Content Risk";
+                result.explanation = ["Platform hosts User-Generated Content (UGC). Credibility is highly variable. **Score reflects platform risk, not content quality.**"];
+                result.color = "yellow"; result.typeLabel = "UGC Social Platform";
+            } else if (isInSourceList(domain, DATA_SOURCES.HIGH_TRUST)) {
+                result.trustScore = 95; result.biasScore = 80; result.verdict = "High Trust / High Integrity";
+                result.explanation = ["This source adheres to high standards (journalistic/academic). Bias risk is actively mitigated."];
+                result.color = "green"; result.typeLabel = "Tier 1 Verified Institution";
+            } else if (isInSourceList(domain, DATA_SOURCES.MODERATE_TRUST)) {
+                result.trustScore = 80; result.biasScore = 70; result.verdict = "Moderate Trust / Noteworthy Source";
+                result.explanation = ["Reputable source, but may have slight institutional or regional bias. **Maintain critical awareness.**"];
+                result.color = "green"; result.typeLabel = "Major News Outlet";
+            }
+
+            // High Bias check runs last to adjust scores on otherwise reputable sources
+            if (isInSourceList(domain, DATA_SOURCES.HIGH_BIAS)) {
+                result.biasScore = Math.min(result.biasScore, 45); // Lower the bias score significantly
+                result.explanation.push(`Bias Alert: Source is known for high partisan/ideological framing. Bias score adjusted to ${result.biasScore}.`);
+                result.color = result.trustScore > 60 ? "yellow" : result.color;
+                result.typeLabel = result.typeLabel.includes("Tier 1") ? "Tier 1 Verified, High Editorial Bias" : "High Partisan Media";
+                result.verdict = result.trustScore > 60 ? "Credible but Highly Partisan" : result.verdict;
+            }
+
+            result.overallScore = Math.round((result.trustScore * 0.6) + (result.biasScore * 0.4));
+            result.color = result.overallScore >= 75 ? 'green' : result.overallScore >= 40 ? 'yellow' : 'red';
+            
+            const typeMatch = Object.keys(SOURCE_TYPES).find(key => domain.includes(key));
+            if (typeMatch) {
+                result.typeLabel = SOURCE_TYPES[typeMatch];
+            }
+            
+            return result;
+        };
+
+
+        // --- UI RENDERING FUNCTIONS (Vanilla JS) ---
+        
+        // Helper for SVG icons
+        const getIconSVG = (name, className = 'h-5 w-5') => {
+            const icons = {
+                Scan: '<path d="M3 7V5c0-1.1.9-2 2-2h2"/><path d="M17 3h2c1.1 0 2 .9 2 2v2"/><path d="M21 17v2c0 1.1-.9 2-2 2h-2"/><path d="M7 21H5c-1.1 0-2-.9-2-2v-2"/>',
+                Zap: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+                Shield: '<path d="M20 13c0 5-2 9-5 9s-5-4-5-9V5l5-4 5 4v8z"/>',
+                Database: '<ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5V19A9 3 0 0 0 21 19V5"/><path d="M3 12A9 9 0 0 0 21 12"/>',
+                AlertCircle: '<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>',
+                CheckCircle: '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+                Search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+            };
+            return `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${className}">${icons[name]}</svg>`;
+        };
+
+        // Helper for progress bar styles
+        const getBarStyles = (score, colorOverride) => {
+            let bgColor = colorOverride || 'bg-yellow-500';
+            if (!colorOverride) {
+                if (score >= 75) bgColor = 'bg-green-500';
+                else if (score < 40) bgColor = 'bg-red-500';
+            }
+            return `width: ${score}%; background-color: ${bgColor.replace('bg-', '#')}; transition: width 1.5s ease-out;`;
+        };
+
+        const getColorClass = (score) => {
+            if (score >= 75) return 'text-green-400 border-green-700 bg-green-900/10';
+            if (score >= 40) return 'text-yellow-400 border-yellow-700 bg-yellow-900/10';
+            return 'text-red-400 border-red-700 bg-red-900/10';
+        };
+
+        // --- CORE APPLICATION STATE & LOGIC ---
+        let urlInput = '';
+        let result = null;
+        let isLoading = false;
+        let error = null;
+
+        const updateState = (newState) => {
+            if (newState.hasOwnProperty('urlInput')) urlInput = newState.urlInput;
+            if (newState.hasOwnProperty('result')) result = newState.result;
+            if (newState.hasOwnProperty('isLoading')) isLoading = newState.isLoading;
+            if (newState.hasOwnProperty('error')) error = newState.error;
+            renderApp(); 
+        };
+
+        const handleCheck = async () => {
+            updateState({ error: null, result: null });
+            if (!urlInput) {
+                updateState({ error: "Input required: Please enter a URL for analysis." });
+                return;
+            }
+
+            const domain = getDomain(urlInput);
+            if (!domain) {
+                updateState({ error: "Format error: Invalid URL structure detected." });
+                return;
+            }
+
+            updateState({ isLoading: true });
+
+            let finalResult = null;
+            let isCached = false;
+
+            // 1. CHECK CACHE (will hit mock DB if offline)
+            if (cacheStatus === 'Online' && db && db.doc && db.getDoc) {
+                try {
+                    const cacheDocRef = db.doc(db, `artifacts/${appId}/public/data/credibility_cache`, domain);
+                    const docSnap = await db.getDoc(cacheDocRef);
+                    
+                    if (docSnap.exists()) {
+                        finalResult = { ...docSnap.data(), is_cached: true };
+                        isCached = true;
+                    }
+                } catch (e) {
+                    // Ignore cache read errors in offline mode
+                }
+            }
+
+            // 2. CALCULATE 
+            if (!finalResult) {
+                await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate analysis time
+                finalResult = calculateCredibility(urlInput);
+                finalResult.is_cached = false;
+            }
+
+            updateState({ result: finalResult });
+
+            // 3. WRITE TO CACHE (will hit mock DB if offline)
+            if (cacheStatus === 'Online' && db && !isCached && finalResult.domain !== 'N/A' && db.doc && db.setDoc) {
+                 try {
+                        const cacheDocRef = db.doc(db, `artifacts/${appId}/public/data/credibility_cache`, finalResult.domain);
+                        const resultToSave = { ...finalResult };
+                        delete resultToSave.is_cached; 
+                        await db.setDoc(cacheDocRef, resultToSave);
+                } catch (e) {
+                    // Ignore cache write errors in offline mode
+                }
+            }
+
+            updateState({ isLoading: false });
+        };
+        
+        // --- RENDERING FUNCTIONS (Templates) ---
+
+        const Header = () => `
+            <div class="text-center mb-8">
+                <h1 class="text-5xl font-black bg-clip-text text-transparent bg-gradient-to-r from-teal-300 to-cyan-500 leading-tight tracking-tighter drop-shadow-lg">
+                    NEWS SOURCE CHECKER
+                </h1>
+                <p class="text-gray-500 mt-2 text-xl font-light">
+                    Real-Time Credibility & Bias Assessment Engine
+                </p>
+                <div class="flex justify-center space-x-6 mt-6 border-b border-slate-700/50">
+                    <div class="flex items-center space-x-2 py-3 px-6 text-sm font-semibold text-white border-b-2 border-cyan-400 shadow-lg shadow-cyan-500/30">
+                        ${getIconSVG('Scan', 'h-4 w-4')}
+                        <span>Source Analysis</span>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        const ScoreBar = (label, score, colorOverride) => `
+            <div class="space-y-1">
+                <div class="flex justify-between items-center text-sm">
+                    <span class="text-slate-400 font-medium">${label}</span>
+                    <span class="font-bold text-white">${score}%</span>
+                </div>
+                <div class="w-full bg-slate-700 h-2 rounded-full overflow-hidden">
+                    <div class="h-full rounded-full" style="${getBarStyles(score, colorOverride)}"></div>
+                </div>
+            </div>
+        `;
+
+        const MetricPill = (label, value, color) => `
+            <div class="flex justify-between items-center text-sm">
+                <span class="text-slate-400 font-medium">${label}:</span>
+                <span class="px-3 py-1 rounded-full text-xs font-bold text-white ${color} shadow-md">
+                    ${value}
+                </span>
+            </div>
+        `;
+
+        const ResultDisplay = (res) => {
+            if (!res) return '';
+            const colorClass = getColorClass(res.overallScore);
+            const explanationList = res.explanation.map((exp) => `
+                <div class="p-3 border border-slate-700 bg-slate-900/50 rounded-lg text-sm text-gray-300">
+                    ${exp.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')}
+                </div>
+            `).join('');
+
+            return `
+                <div class="mt-8 p-8 rounded-2xl border-t-8 shadow-2xl transition duration-500 ${res.color === 'green' ? 'border-green-500 bg-slate-900/70' : res.color === 'yellow' ? 'border-yellow-500 bg-slate-900/70' : 'border-red-500 bg-slate-900/70'}">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                        
+                        <!-- 1. Overall Score Panel (Animated score logic removed for simple JS) -->
+                        <div class="md:col-span-1 flex flex-col items-center justify-center p-4 rounded-xl border border-slate-700/50 bg-slate-900 shadow-inner">
+                            <h4 class="text-base font-semibold text-cyan-400 mb-2 tracking-widest uppercase">Overall Integrity</h4>
+                            <span class="text-5xl font-extrabold ${getColorClass(res.overallScore)}">${res.overallScore}</span>
+                            <p class="text-3xl text-gray-400 font-light mt-1">/100</p>
+                            <p class="mt-4 text-lg font-bold ${colorClass}">${res.verdict}</p>
+                        </div>
+
+                        <!-- 2. Metric Breakdown -->
+                        <div class="md:col-span-2 space-y-4">
+                            ${MetricPill("Source Domain", res.domain, "bg-cyan-600")}
+                            ${MetricPill("Classification Type", res.typeLabel, "bg-teal-600")}
+                            
+                            ${ScoreBar("Trustworthiness Score", res.trustScore, "bg-teal-500")}
+                            ${ScoreBar("Bias Risk Index (100=Low Risk)", res.biasScore, "bg-pink-500")}
+
+                            ${res.is_cached ? `
+                                <p class="text-xs text-cyan-400 italic mt-4 text-right flex items-center justify-end space-x-1">
+                                    ${getIconSVG('Database', 'h-3 w-3')}
+                                    <span>Analysis sourced from Public Cache (Offline Mode).</span>
+                                </p>
+                            ` : ''}
+                        </div>
+                    </div>
+
+                    <!-- 3. Explanation Panel -->
+                    <div class="mt-8 pt-6 border-t border-slate-700">
+                        <h4 class="font-bold text-xl text-white mb-4 flex items-center space-x-2">
+                            ${getIconSVG('Shield', 'h-5 w-5 text-teal-400')}
+                            <span>Assessment Protocol Summary</span>
+                        </h4>
+                        <div class="space-y-4">${explanationList}</div>
+                    </div>
+                </div>
+            `;
+        };
+
+        const CheckerModule = () => {
+            const disabled = isLoading; 
+            
+            const buttonContent = isLoading 
+                ? `<div class="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full mr-2"></div><span class="text-lg tracking-wider">Executing Deep Scan...</span>`
+                : `${getIconSVG('Zap', 'h-5 w-5')} <span class="text-lg tracking-wider">Run Integrity Analysis</span>`;
+
+            return `
+                <div class="p-4 sm:p-6 bg-slate-800/20 rounded-xl shadow-inner border border-slate-700/50">
+                    <div class="space-y-6">
+                        <div class="relative">
+                            ${getIconSVG('Search', 'absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-cyan-400')}
+                            <input
+                                id="url-input"
+                                type="text"
+                                placeholder="Enter full resource URL for deep assessment (e.g., https://https://www.bbc.com/news/uk-politics-67769947)..."
+                                value="${urlInput}"
+                                class="w-full pl-12 pr-4 py-4 bg-slate-900 text-white border-2 border-slate-700 rounded-xl shadow-lg focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition duration-300 ${error ? 'border-red-500' : ''}"
+                            />
+                        </div>
+                        
+                        <button
+                            id="check-button"
+                            class="w-full py-3 bg-gradient-to-r from-teal-500 to-cyan-600 text-white font-bold rounded-xl shadow-2xl shadow-cyan-600/50 hover:from-teal-600 hover:to-cyan-700 transition duration-300 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center space-x-3"
+                            ${disabled ? 'disabled' : ''}
+                        >
+                            ${buttonContent}
+                        </button>
+                    </div>
+                    ${error ? `
+                        <div class="mt-4 p-4 bg-red-900/30 text-red-300 border border-red-700 rounded-lg font-medium text-sm flex items-center space-x-2">
+                            ${getIconSVG('AlertCircle', 'h-4 w-4')}
+                            <span>System Warning: ${error}</span>
+                        </div>
+                    ` : ''}
+                    ${ResultDisplay(result)}
+                </div>
+            `;
+        };
+        
+        const AboutPanel = () => `
+            <div class="mt-8 p-4 bg-slate-900 rounded-xl border border-slate-800 shadow-xl">
+                <h4 class="text-sm font-bold text-teal-400 mb-3 uppercase tracking-wider">About the Checker</h4>
+                <p class="text-xs text-slate-400 leading-relaxed">
+                    The Checker engine assesses sources based on a proprietary data matrix and journalistic standards criteria. Scores are weighted by Trust (60%) and Bias Risk (40%). When running offline, this engine relies solely on its internal classification matrix and provides results instantly. The current database contains **over 140 classified domains** across global news and information sources.
+                </p>
+            </div>
+        `;
+
+
+        const renderApp = () => {
+            const root = document.getElementById('app-root');
+            root.innerHTML = `
+                <div class="bg-slate-900 rounded-3xl shadow-2xl shadow-slate-950/70 p-6 sm:p-10 border border-slate-800">
+                    ${Header()}
+                    <div class="min-h-[450px]">
+                        ${CheckerModule()}
+                    </div>
+                    ${AboutPanel()}
+                </div>
+            `;
+            
+            // Add event listeners after rendering
+            const inputElement = document.getElementById('url-input');
+            const buttonElement = document.getElementById('check-button');
+
+            if (inputElement) {
+                inputElement.oninput = (e) => {
+                    urlInput = e.target.value;
+                };
+
+                inputElement.onkeydown = (e) => {
+                    if (e.key === 'Enter') handleCheck();
+                };
+            }
+
+            if (buttonElement) {
+                buttonElement.onclick = handleCheck;
+            }
+        };
+
+        window.onload = async () => {
+            await initFirebase(); 
+            renderApp();
+        };
+
+    </script>
+</body>
+</html>
