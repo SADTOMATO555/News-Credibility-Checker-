@@ -1,3 +1,4 @@
 Websites
 https://fakenewscheckr.netlify.app/
-isthisnewscorrect.live
+or
+https://isthisnewscorrect.live/
